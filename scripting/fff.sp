@@ -1,3 +1,12 @@
+/*
+Fixed Friendly Fire
+By: Chdata & Kit O' Rifty
+
+TODO:
+Fix Flying Guillotine cleavers.
+
+*/
+
 #pragma semicolon 1
 #include <sourcemod>
 #include <sdkhooks>
