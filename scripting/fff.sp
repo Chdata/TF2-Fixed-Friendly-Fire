@@ -4,6 +4,7 @@ By: Chdata & Kit O' Rifty
 
 TODO:
 Fix Flying Guillotine cleavers.
+Investigate bodies falling through the ground when you die after toggling the plugin on/off
 
 */
 
