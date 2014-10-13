@@ -1,6 +1,4 @@
-TF2 Ignore List
+Fixed Friendly Fire
 ===============
 
-This plugin allows users to type '!ignore @target/username' to block another's chat or voice.
-
-Not tested outside of TF2.
+Fixes clipping for various projectiles, flames, and pushes players apart when stuck in teammates.
