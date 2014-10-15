@@ -14,7 +14,7 @@ Investigate bodies falling through the ground when you die after toggling the pl
 #include <tf2_stocks>
 #include <morecolors>
 
-#define PLUGIN_VERSION "0x01"
+#define PLUGIN_VERSION "0x02"
 
 static const String:g_sPvPProjectileClasses[][] = 
 {
@@ -22,8 +22,8 @@ static const String:g_sPvPProjectileClasses[][] =
     "tf_projectile_sentryrocket", 
     "tf_projectile_arrow", 
     "tf_projectile_stun_ball",
+    //"tf_projectile_cleaver",
     "tf_projectile_ball_ornament",
-    "tf_projectile_cleaver",
     "tf_projectile_energy_ball",
     "tf_projectile_energy_ring",
     "tf_projectile_flare",
@@ -31,7 +31,7 @@ static const String:g_sPvPProjectileClasses[][] =
     "tf_projectile_jar",
     "tf_projectile_jar_milk",
     "tf_projectile_pipe",
-    "tf_projectile_pipe_remote",
+    //"tf_projectile_pipe_remote",
     "tf_projectile_syringe"
 };
 
@@ -68,14 +68,14 @@ public OnPluginStart()
         {
             if (GetConVarBool(FindConVar("mp_friendlyfire")))
             {
-                SDKHook(lClient, SDKHook_ShouldCollide, Hook_ClientPvPShouldCollide);
+                //SDKHook(lClient, SDKHook_ShouldCollide, Hook_ClientPvPShouldCollide);
                 SDKHook(lClient, SDKHook_PreThinkPost, FriendlyPushApart);
             }
-            else
-            {
-                SDKUnhook(lClient, SDKHook_ShouldCollide, Hook_ClientPvPShouldCollide);
-                SDKUnhook(lClient, SDKHook_PreThinkPost, FriendlyPushApart);
-            }
+            // else
+            // {
+            //     SDKUnhook(lClient, SDKHook_ShouldCollide, Hook_ClientPvPShouldCollide);
+            //     SDKUnhook(lClient, SDKHook_PreThinkPost, FriendlyPushApart);
+            // }
         }
     }
 
@@ -86,15 +86,15 @@ public OnClientPostAdminCheck(iClient)
 {
     if (bFriendlyFire)
     {
-        SDKHook(iClient, SDKHook_ShouldCollide, Hook_ClientPvPShouldCollide);
+        //SDKHook(iClient, SDKHook_ShouldCollide, Hook_ClientPvPShouldCollide);
         SDKHook(iClient, SDKHook_PreThinkPost, FriendlyPushApart);
     }
 }
 
 public OnClientDisconnect(iClient)
 {
-    SDKUnhook(iClient, SDKHook_ShouldCollide, Hook_ClientPvPShouldCollide);
-    SDKUnhook(iClient, SDKHook_PreThinkPost, FriendlyPushApart);
+    //SDKUnhook(iClient, SDKHook_ShouldCollide, Hook_ClientPvPShouldCollide);
+    //SDKUnhook(iClient, SDKHook_PreThinkPost, FriendlyPushApart);
 }
 
 public OnMapStart()
@@ -140,12 +140,12 @@ public CvarChange(Handle:convar, const String:oldValue[], const String:newValue[
         {
             if (bFriendlyFire)
             {
-                SDKHook(lClient, SDKHook_ShouldCollide, Hook_ClientPvPShouldCollide);
+                //SDKHook(lClient, SDKHook_ShouldCollide, Hook_ClientPvPShouldCollide);
                 SDKHook(lClient, SDKHook_PreThinkPost, FriendlyPushApart);
             }
             else
             {
-                SDKUnhook(lClient, SDKHook_ShouldCollide, Hook_ClientPvPShouldCollide);
+                //SDKUnhook(lClient, SDKHook_ShouldCollide, Hook_ClientPvPShouldCollide);
                 SDKUnhook(lClient, SDKHook_PreThinkPost, FriendlyPushApart);
             }
             
@@ -378,22 +378,41 @@ public OnEntityCreated(ent, const String:sClassname[])
     }
     else
     {
-        if (!bFriendlyFire)
+        if (bFriendlyFire)
         {
-            return;
-        }
-
-        for (new i = 0; i < sizeof(g_sPvPProjectileClasses); i++)
-        {
-            if (StrEqual(sClassname, g_sPvPProjectileClasses[i], false))
+            for (new i = 0; i < sizeof(g_sPvPProjectileClasses); i++)
             {
-                SDKHook(ent, SDKHook_Spawn, Hook_PvPProjectileSpawn);
-                SDKHook(ent, SDKHook_SpawnPost, Hook_PvPProjectileSpawnPost);
-                break;
+                if (StrEqual(sClassname, g_sPvPProjectileClasses[i], false))
+                {
+                    SDKHook(ent, SDKHook_Spawn, Hook_PvPProjectileSpawn);
+                    SDKHook(ent, SDKHook_SpawnPost, Hook_PvPProjectileSpawnPost);
+                    break;
+                }
             }
+
+            /*if (StrEqual(sClassname, "tf_projectile_cleaver", false))
+            {
+                SDKHook(ent, SDKHook_StartTouch, Hook_PVPCleaverHit);
+            }*/
         }
     }
 }
+
+/*public Action:Hook_PVPCleaverHit(entity, other)
+{
+    if (IsValidClient(other))
+    {
+        new iOwnerEntity = GetEntPropEnt(entity, Prop_Data, "m_hOwnerEntity");
+        if (IsValidClient(iOwnerEntity) && iOwnerEntity != other)
+        {
+            if (GetClientTeam(other) == GetClientTeam(iOwnerEntity))
+            {
+                TF2_MakeBleed(other, iOwnerEntity, 5.0);
+                SDKHooks_TakeDamage(other, iOwnerEntity, iOwnerEntity, 50.0, IsClientCritBoosted(iOwnerEntity) ? (DMG_SLASH | DMG_ACID) : DMG_SLASH); 
+            }
+        }
+    }
+}*/
 
 public OnEntityDestroyed(ent)
 {
@@ -415,53 +434,36 @@ public OnEntityDestroyed(ent)
 
 public Action:Hook_PvPProjectileSpawn(ent)
 {
-    // if (!bFriendlyFire)
-    // {
-    //     return Plugin_Continue;
-    // }
-
-    decl String:sClass[64];
-    GetEntityClassname(ent, sClass, sizeof(sClass));
-    
-    new iThrowerOffset = FindDataMapOffs(ent, "m_hThrower");
-    new iOwnerEntity = GetEntPropEnt(ent, Prop_Data, "m_hOwnerEntity");
-    
-    if (iOwnerEntity == -1 && iThrowerOffset != -1)
-    {
-        iOwnerEntity = GetEntDataEnt2(ent, iThrowerOffset);
-    }
-    
-    if (IsValidClient(iOwnerEntity))
-    {
-        SetEntProp(ent, Prop_Data, "m_iInitialTeamNum", 0);
-        SetEntProp(ent, Prop_Send, "m_iTeamNum", 0);
-    }
+    ChangeProjectileTeam(ent);
 
     return Plugin_Continue;
 }
 
 public Hook_PvPProjectileSpawnPost(ent)
 {
-    // if (!bFriendlyFire)
-    // {
-    //     return;
-    // }
+    ChangeProjectileTeam(ent);
+}
 
-    decl String:sClass[64];
-    GetEntityClassname(ent, sClass, sizeof(sClass));
-    
-    new iThrowerOffset = FindDataMapOffs(ent, "m_hThrower");
-    new iOwnerEntity = GetEntPropEnt(ent, Prop_Data, "m_hOwnerEntity");
-    
-    if (iOwnerEntity == -1 && iThrowerOffset != -1)
+stock ChangeProjectileTeam(ent)
+{
+    if (bFriendlyFire)
     {
-        iOwnerEntity = GetEntDataEnt2(ent, iThrowerOffset);
-    }
-    
-    if (IsValidClient(iOwnerEntity))
-    {
-        SetEntProp(ent, Prop_Data, "m_iInitialTeamNum", 0);
-        SetEntProp(ent, Prop_Send, "m_iTeamNum", 0);
+        decl String:sClass[64];
+        GetEntityClassname(ent, sClass, sizeof(sClass));
+        
+        new iThrowerOffset = FindDataMapOffs(ent, "m_hThrower");
+        new iOwnerEntity = GetEntPropEnt(ent, Prop_Data, "m_hOwnerEntity");
+        
+        if (iOwnerEntity == -1 && iThrowerOffset != -1)
+        {
+            iOwnerEntity = GetEntDataEnt2(ent, iThrowerOffset);
+        }
+        
+        if (IsValidClient(iOwnerEntity))
+        {
+            SetEntProp(ent, Prop_Data, "m_iInitialTeamNum", 0);
+            SetEntProp(ent, Prop_Send, "m_iTeamNum", 0);
+        }
     }
 }
 
