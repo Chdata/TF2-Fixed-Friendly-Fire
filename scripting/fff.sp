@@ -1,28 +1,59 @@
 /*
-Fixed Friendly Fire
-By: Chdata & Kit O' Rifty
+    Fixed Friendly Fire
+    By: Chdata & Kit O' Rifty
 
-TODO:
-Fix Flying Guillotine cleavers.
-Investigate bodies falling through the ground when you die after toggling the plugin on/off
-
+    TODO:
+    Fix Flying Guillotine cleavers.
+    Investigate bodies falling through the ground when you die after toggling the plugin on/off.
 */
 
 #pragma semicolon 1
 #include <sourcemod>
 #include <sdkhooks>
 #include <tf2_stocks>
+#include <dhooks>
 #include <morecolors>
 
-#define PLUGIN_VERSION "0x02"
+#define PLUGIN_VERSION "0x03"
+
+#if !defined _smlib_included
+enum // Collision_Group_t in const.h - m_CollisionGroup
+{
+    COLLISION_GROUP_NONE  = 0,
+    COLLISION_GROUP_DEBRIS,             // Collides with nothing but world and static stuff
+    COLLISION_GROUP_DEBRIS_TRIGGER,     // Same as debris, but hits triggers
+    COLLISION_GROUP_INTERACTIVE_DEBRIS, // Collides with everything except other interactive debris or debris
+    COLLISION_GROUP_INTERACTIVE,        // Collides with everything except interactive debris or debris         // Can be hit by bullets, explosions, players, projectiles, melee
+    COLLISION_GROUP_PLAYER,                                                                                     // Can be hit by bullets, explosions, players, projectiles, melee
+    COLLISION_GROUP_BREAKABLE_GLASS,
+    COLLISION_GROUP_VEHICLE,
+    COLLISION_GROUP_PLAYER_MOVEMENT,    // For HL2, same as Collision_Group_Player, for
+                                        // TF2, this filters out other players and CBaseObjects
+    COLLISION_GROUP_NPC,                // Generic NPC group
+    COLLISION_GROUP_IN_VEHICLE,         // for any entity inside a vehicle                                      // Can be hit by explosions. Melee unknown.
+    COLLISION_GROUP_WEAPON,             // for any weapons that need collision detection
+    COLLISION_GROUP_VEHICLE_CLIP,       // vehicle clip brush to restrict vehicle movement
+    COLLISION_GROUP_PROJECTILE,         // Projectiles!
+    COLLISION_GROUP_DOOR_BLOCKER,       // Blocks entities not permitted to get near moving doors
+    COLLISION_GROUP_PASSABLE_DOOR,      // ** sarysa TF2 note: Must be scripted, not passable on physics prop (Doors that the player shouldn't collide with)
+    COLLISION_GROUP_DISSOLVING,         // Things that are dissolving are in this group
+    COLLISION_GROUP_PUSHAWAY,           // ** sarysa TF2 note: I could swear the collision detection is better for this than NONE. (Nonsolid on client and server, pushaway in player code) // Can be hit by bullets, explosions, projectiles, melee
+
+    COLLISION_GROUP_NPC_ACTOR,          // Used so NPCs in scripts ignore the player.
+    COLLISION_GROUP_NPC_SCRIPTED = 19,  // USed for NPCs in scripts that should not collide with each other.
+
+    LAST_SHARED_COLLISION_GROUP
+};
+#endif
 
 static const String:g_sPvPProjectileClasses[][] = 
 {
+    //"tf_projectile_pipe_remote",
+    //"tf_projectile_cleaver",
     "tf_projectile_rocket", 
     "tf_projectile_sentryrocket", 
     "tf_projectile_arrow", 
     "tf_projectile_stun_ball",
-    //"tf_projectile_cleaver",
     "tf_projectile_ball_ornament",
     "tf_projectile_energy_ball",
     "tf_projectile_energy_ring",
@@ -31,20 +62,13 @@ static const String:g_sPvPProjectileClasses[][] =
     "tf_projectile_jar",
     "tf_projectile_jar_milk",
     "tf_projectile_pipe",
-    //"tf_projectile_pipe_remote",
     "tf_projectile_syringe"
 };
 
-static bool:bFriendlyFire = false;
+static bool:g_bFriendlyFire = false;
+static Handle:mp_friendlyfire;
 
-static Handle:g_hPvPFlameEntities;
-
-enum
-{
-    PvPFlameEntData_EntRef = 0,
-    PvPFlameEntData_LastHitEntRef,
-    PvPFlameEntData_MaxStats
-};
+static Handle:g_fnWantsLagCompensationOnEntity;
 
 public Plugin:myinfo = {
     name = "Fixed Friendly Fire",
@@ -56,61 +80,70 @@ public Plugin:myinfo = {
 
 public OnPluginStart()
 {
-    g_hPvPFlameEntities = CreateArray(PvPFlameEntData_MaxStats);
+    mp_friendlyfire = FindConVar("mp_friendlyfire");
+    HookConVarChange(mp_friendlyfire, CvarChange);
 
-    HookConVarChange(FindConVar("mp_friendlyfire"), CvarChange);
-
+    RegAdminCmd("sm_fff", cmdFriendlyFireToggle, ADMFLAG_CHEATS, "sm_friendlyfire <on/off> - Toggles mp_friendlyfire status.");
     RegAdminCmd("sm_friendlyfire", cmdFriendlyFireToggle, ADMFLAG_CHEATS, "sm_friendlyfire <on/off> - Toggles mp_friendlyfire status.");
 
-    for (new lClient = 1; lClient <= MaxClients; lClient++)
+    Gamedata_OnPluginStart();
+}
+
+void Gamedata_OnPluginStart()
+{
+    Handle hConfig = LoadGameConfigFile("data.friendlyfire");
+    if (hConfig == INVALID_HANDLE)
     {
-        if (IsClientInGame(lClient))
+        SetFailState("Could not find friendlyfire gamedata file: [data.friendlyfire.txt]!");
+    }
+    
+    int iOffset = GameConfGetOffset(hConfig, "CTFPlayer::WantsLagCompensationOnEntity"); 
+    g_fnWantsLagCompensationOnEntity = DHookCreate(iOffset, HookType_Entity, ReturnType_Bool, ThisPointer_CBaseEntity, Hook_ClientWantsLagCompensationOnEntity); 
+    if (g_fnWantsLagCompensationOnEntity == INVALID_HANDLE)
+    {
+        SetFailState("Failed to create hook CTFPlayer::WantsLagCompensationOnEntity offset from [data.friendlyfire.txt] gamedata!");
+    }
+    
+    DHookAddParam(g_fnWantsLagCompensationOnEntity, HookParamType_CBaseEntity);
+    DHookAddParam(g_fnWantsLagCompensationOnEntity, HookParamType_ObjectPtr);
+    DHookAddParam(g_fnWantsLagCompensationOnEntity, HookParamType_Unknown);
+}
+
+public OnClientPutInServer(iClient)
+{
+    if (g_bFriendlyFire)
+    {
+        SDKHook(iClient, SDKHook_PreThinkPost, Client_OnPreThinkPost);
+
+        if (IsFakeClient(iClient))
         {
-            if (GetConVarBool(FindConVar("mp_friendlyfire")))
-            {
-                //SDKHook(lClient, SDKHook_ShouldCollide, Hook_ClientPvPShouldCollide);
-                SDKHook(lClient, SDKHook_PreThinkPost, FriendlyPushApart);
-            }
-            // else
-            // {
-            //     SDKUnhook(lClient, SDKHook_ShouldCollide, Hook_ClientPvPShouldCollide);
-            //     SDKUnhook(lClient, SDKHook_PreThinkPost, FriendlyPushApart);
-            // }
+            return;
         }
+        DHookEntity(g_fnWantsLagCompensationOnEntity, true, iClient);
     }
-
-    // AutoExecConfig(true, "plugin.friendlyfire");
-}
-
-public OnClientPostAdminCheck(iClient)
-{
-    if (bFriendlyFire)
-    {
-        //SDKHook(iClient, SDKHook_ShouldCollide, Hook_ClientPvPShouldCollide);
-        SDKHook(iClient, SDKHook_PreThinkPost, FriendlyPushApart);
-    }
-}
-
-public OnClientDisconnect(iClient)
-{
-    //SDKUnhook(iClient, SDKHook_ShouldCollide, Hook_ClientPvPShouldCollide);
-    //SDKUnhook(iClient, SDKHook_PreThinkPost, FriendlyPushApart);
 }
 
 public OnMapStart()
 {
-    ClearArray(g_hPvPFlameEntities);
+    for (new lClient = 1; lClient <= MaxClients; lClient++)
+    {
+        if (IsClientInGame(lClient))
+        {
+            if (GetConVarBool(mp_friendlyfire))
+            {
+                SDKHook(lClient, SDKHook_PreThinkPost, Client_OnPreThinkPost);
+            }
+        }
+    }
 }
 
 public OnConfigsExecuted()
 {
-    bFriendlyFire = GetConVarBool(FindConVar("mp_friendlyfire"));
+    g_bFriendlyFire = GetConVarBool(mp_friendlyfire);
 }
 
 public CvarChange(Handle:convar, const String:oldValue[], const String:newValue[])
 {
-    // CPrintToChdata("ff status changed");
-    
     new Handle:svtags = FindConVar("sv_tags");
     new sflags = GetConVarFlags(svtags);
     sflags &= ~FCVAR_NOTIFY;
@@ -120,62 +153,54 @@ public CvarChange(Handle:convar, const String:oldValue[], const String:newValue[
     flags &= ~FCVAR_NOTIFY;
     SetConVarFlags(convar, flags);
 
-    bFriendlyFire = GetConVarBool(convar);
+    g_bFriendlyFire = GetConVarBool(convar);
 
-    SetConVarBool(FindConVar("tf_avoidteammates"), !bFriendlyFire, true);
-
-    // if (bFriendlyFire)
-    // {
-    //     SetConVarInt(FindConVar("tf_avoidteammates"), 0);           // Friendly players are solid
-    //     //SetConVarInt(FindConVar("tf_avoidteammates_pushaway"), 0);
-    // }
-    // else
-    // {
-    //     SetConVarInt(FindConVar("tf_avoidteammates"), 1);           // Friendly players are not solid
-    // }
+    SetConVarBool(FindConVar("tf_avoidteammates"), !g_bFriendlyFire, true);
 
     for (new lClient = 1; lClient <= MaxClients; lClient++)
     {
-        if (IsClientInGame(lClient)) // && IsPlayerAlive(lClient)
+        if (IsClientInGame(lClient))
         {
-            if (bFriendlyFire)
+            if (g_bFriendlyFire)
             {
-                //SDKHook(lClient, SDKHook_ShouldCollide, Hook_ClientPvPShouldCollide);
-                SDKHook(lClient, SDKHook_PreThinkPost, FriendlyPushApart);
+                SDKHook(lClient, SDKHook_PreThinkPost, Client_OnPreThinkPost);
             }
             else
             {
-                //SDKUnhook(lClient, SDKHook_ShouldCollide, Hook_ClientPvPShouldCollide);
-                SDKUnhook(lClient, SDKHook_PreThinkPost, FriendlyPushApart);
+                SDKUnhook(lClient, SDKHook_PreThinkPost, Client_OnPreThinkPost);
             }
             
         }
     }
 
-    CPrintToChatAll("{green}[{lightgreen}FF{green}]{default} Friendly Fire has been %sabled.", bFriendlyFire ? "en" : "dis");
+    //CPrintToChatAll("{green}[{lightgreen}FF{green}]{default} Friendly Fire has been %sabled.", g_bFriendlyFire ? "en" : "dis");
 }
 
 /*
-Runs every frame for clients
+    Runs every frame for clients
 
 */
-public FriendlyPushApart(iClient)
-{    
-    // if (!bFriendlyFire)
-    // {
-    //     // Technically this code should never be reached because we unhook it during CvarChange
-    //     SDKUnhook(iClient, SDKHook_PreThinkPost, FriendlyPushApart);
-    //     return;
-    // }
-
+public Client_OnPreThinkPost(iClient)
+{
     if (IsPlayerAlive(iClient) && IsPlayerStuck(iClient))       // If a player is stuck in a player, push them apart
     {
         PushClientsApart(iClient, TR_GetEntityIndex());         // Temporarily remove collision while we push apart
     }
     else
     {
-        SetEntProp(iClient, Prop_Send, "m_CollisionGroup", 5);  // Same collision as normal
+        SetEntProp(iClient, Prop_Send, "m_CollisionGroup", COLLISION_GROUP_PLAYER);
     }
+}
+
+public MRESReturn Hook_ClientWantsLagCompensationOnEntity(int iClient, Handle hReturn, Handle hParams)
+{
+    if (!g_bFriendlyFire)
+    {
+        return MRES_Ignored;
+    }
+
+    DHookSetReturn(hReturn, true);
+    return MRES_Supercede;
 }
 
 stock bool:IsPlayerStuck(iEntity)
@@ -197,8 +222,8 @@ public bool:TraceRayPlayerOnly(iEntity, iMask, any:iData)
 
 stock PushClientsApart(iClient1, iClient2)
 {
-    SetEntProp(iClient1, Prop_Send, "m_CollisionGroup", 2);     // No collision with players and certain projectiles
-    SetEntProp(iClient2, Prop_Send, "m_CollisionGroup", 2);
+    SetEntProp(iClient1, Prop_Send, "m_CollisionGroup", COLLISION_GROUP_DEBRIS_TRIGGER);     // No collision with players and certain projectiles
+    SetEntProp(iClient2, Prop_Send, "m_CollisionGroup", COLLISION_GROUP_DEBRIS_TRIGGER);
 
     decl Float:vVel[3];
 
@@ -215,15 +240,14 @@ stock PushClientsApart(iClient1, iClient2)
     vVel[1] += 0.1;                         // This is just a safeguard for sm_tele
     vVel[2] = 0.0;                          // Negate upwards push. += 280.0; for extra upwards push (can have sort of a fan/vent effect)
 
-    new iBaseVelocityOffset = FindSendPropOffs("CBasePlayer","m_vecBaseVelocity");
-    SetEntDataVector(iClient1, iBaseVelocityOffset, vVel, true);
+    SetEntPropVector(iClient1, Prop_Send, "m_vecBaseVelocity", vVel);
 }
 
 public Action:cmdFriendlyFireToggle(iClient, iArgc)
 {
     if (iArgc < 1)
     {
-        SetFriendlyFire(!bFriendlyFire);
+        SetFriendlyFire(!g_bFriendlyFire);
     }
     else
     {
@@ -240,7 +264,7 @@ public Action:cmdFriendlyFireToggle(iClient, iArgc)
         }
         else
         {
-            SetFriendlyFire(!bFriendlyFire);
+            SetFriendlyFire(!g_bFriendlyFire);
         }
     }
 
@@ -249,185 +273,21 @@ public Action:cmdFriendlyFireToggle(iClient, iArgc)
 
 stock SetFriendlyFire(bool:bStatus)
 {
-    SetConVarBool(FindConVar("mp_friendlyfire"), bStatus, true);
-}
-
-// Start of Kit O' Rifty's material
-
-public OnGameFrame()
-{
-    if (bFriendlyFire)
-    {
-        // Process through PvP projectiles.
-        for (new i = 0; i < sizeof(g_sPvPProjectileClasses); i++)
-        {
-            new ent = -1;
-            while ((ent = FindEntityByClassname(ent, g_sPvPProjectileClasses[i])) != -1)
-            {
-                new iThrowerOffset = FindDataMapOffs(ent, "m_hThrower");
-                new bool:bChangeProjectileTeam = false;
-                
-                new iOwnerEntity = GetEntPropEnt(ent, Prop_Data, "m_hOwnerEntity");
-                if (IsValidClient(iOwnerEntity))
-                {
-                    bChangeProjectileTeam = true;
-                }
-                else if (iThrowerOffset != -1)
-                {
-                    iOwnerEntity = GetEntDataEnt2(ent, iThrowerOffset);
-                    if (IsValidClient(iOwnerEntity))
-                    {
-                        bChangeProjectileTeam = true;
-                    }
-                }
-                
-                if (bChangeProjectileTeam)
-                {
-                    SetEntProp(ent, Prop_Data, "m_iInitialTeamNum", 0);
-                    SetEntProp(ent, Prop_Send, "m_iTeamNum", 0);
-                }
-            }
-        }
-
-        // Process through PvP flame entities.
-        static Float:flMins[3] = { -6.0, ... };
-        static Float:flMaxs[3] = { 6.0, ... };
-        
-        decl Float:flOrigin[3];
-        
-        new Handle:hTrace = INVALID_HANDLE;
-        new ent = -1;
-        new iOwnerEntity = INVALID_ENT_REFERENCE; 
-        new iHitEntity = INVALID_ENT_REFERENCE;
-        
-        while ((ent = FindEntityByClassname(ent, "tf_flame")) != -1)
-        {
-            iOwnerEntity = GetEntPropEnt(ent, Prop_Data, "m_hOwnerEntity");
-            
-            if (IsValidEdict(iOwnerEntity))
-            {
-                // tf_flame's initial owner SHOULD be the flamethrower that it originates from.
-                // If not, then something's completely bogus.
-                
-                iOwnerEntity = GetEntPropEnt(iOwnerEntity, Prop_Data, "m_hOwnerEntity");
-            }
-            
-            if (IsValidClient(iOwnerEntity))
-            {
-                GetEntPropVector(ent, Prop_Data, "m_vecAbsOrigin", flOrigin);
-                
-                hTrace = TR_TraceHullFilterEx(flOrigin, flOrigin, flMins, flMaxs, MASK_PLAYERSOLID, TraceRayDontHitSelf, iOwnerEntity);
-                iHitEntity = TR_GetEntityIndex(hTrace);
-                CloseHandle(hTrace);
-                
-                if (IsValidEntity(iHitEntity))
-                {
-                    new entref = EntIndexToEntRef(ent);
-                    
-                    new iIndex = FindValueInArray(g_hPvPFlameEntities, entref);
-                    if (iIndex != -1)
-                    {
-                        new iLastHitEnt = EntRefToEntIndex(GetArrayCell(g_hPvPFlameEntities, iIndex, PvPFlameEntData_LastHitEntRef));
-                    
-                        if (iHitEntity != iLastHitEnt)
-                        {
-                            SetArrayCell(g_hPvPFlameEntities, iIndex, EntIndexToEntRef(iHitEntity), PvPFlameEntData_LastHitEntRef);
-                            PvP_OnFlameEntityStartTouchPost(ent, iHitEntity);
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-public bool:TraceRayDontHitSelf(entity, mask, any:data)
-{
-    return (entity != data);
-}
-
-static PvP_OnFlameEntityStartTouchPost(flame, other)
-{
-    if (IsValidClient(other))
-    {
-        new iFlamethrower = GetEntPropEnt(flame, Prop_Data, "m_hOwnerEntity");
-        if (IsValidEdict(iFlamethrower))
-        {
-            new iOwnerEntity = GetEntPropEnt(iFlamethrower, Prop_Data, "m_hOwnerEntity");
-            if (iOwnerEntity != other && IsValidClient(iOwnerEntity))
-            {
-                if (GetClientTeam(other) == GetClientTeam(iOwnerEntity))
-                {
-                    TF2_IgnitePlayer(other, iOwnerEntity);
-                    SDKHooks_TakeDamage(other, iOwnerEntity, iOwnerEntity, 7.0, IsClientCritBoosted(iOwnerEntity) ? (DMG_BURN | DMG_PREVENT_PHYSICS_FORCE | DMG_ACID) : DMG_BURN | DMG_PREVENT_PHYSICS_FORCE); 
-                }
-            }
-        }
-    }
+    SetConVarBool(mp_friendlyfire, bStatus, true);
 }
 
 public OnEntityCreated(ent, const String:sClassname[])
 {
-    if (StrEqual(sClassname, "tf_flame", false))
+    if (g_bFriendlyFire)
     {
-        new iIndex = PushArrayCell(g_hPvPFlameEntities, EntIndexToEntRef(ent));
-        if (iIndex != -1)
+        for (new i = 0; i < sizeof(g_sPvPProjectileClasses); i++)
         {
-            SetArrayCell(g_hPvPFlameEntities, iIndex, INVALID_ENT_REFERENCE, PvPFlameEntData_LastHitEntRef);
-        }
-    }
-    else
-    {
-        if (bFriendlyFire)
-        {
-            for (new i = 0; i < sizeof(g_sPvPProjectileClasses); i++)
+            if (StrEqual(sClassname, g_sPvPProjectileClasses[i], false))
             {
-                if (StrEqual(sClassname, g_sPvPProjectileClasses[i], false))
-                {
-                    SDKHook(ent, SDKHook_Spawn, Hook_PvPProjectileSpawn);
-                    SDKHook(ent, SDKHook_SpawnPost, Hook_PvPProjectileSpawnPost);
-                    break;
-                }
+                SDKHook(ent, SDKHook_Spawn, Hook_PvPProjectileSpawn);
+                SDKHook(ent, SDKHook_SpawnPost, Hook_PvPProjectileSpawnPost);
+                break;
             }
-
-            /*if (StrEqual(sClassname, "tf_projectile_cleaver", false))
-            {
-                SDKHook(ent, SDKHook_StartTouch, Hook_PVPCleaverHit);
-            }*/
-        }
-    }
-}
-
-/*public Action:Hook_PVPCleaverHit(entity, other)
-{
-    if (IsValidClient(other))
-    {
-        new iOwnerEntity = GetEntPropEnt(entity, Prop_Data, "m_hOwnerEntity");
-        if (IsValidClient(iOwnerEntity) && iOwnerEntity != other)
-        {
-            if (GetClientTeam(other) == GetClientTeam(iOwnerEntity))
-            {
-                TF2_MakeBleed(other, iOwnerEntity, 5.0);
-                SDKHooks_TakeDamage(other, iOwnerEntity, iOwnerEntity, 50.0, IsClientCritBoosted(iOwnerEntity) ? (DMG_SLASH | DMG_ACID) : DMG_SLASH); 
-            }
-        }
-    }
-}*/
-
-public OnEntityDestroyed(ent)
-{
-    if (!IsValidEntity(ent) || ent <= 0) return;
-
-    decl String:sClassname[64];
-    GetEntityClassname(ent, sClassname, sizeof(sClassname));
-
-    if (StrEqual(sClassname, "tf_flame", false))
-    {
-        new entref = EntIndexToEntRef(ent);
-        new iIndex = FindValueInArray(g_hPvPFlameEntities, entref);
-        if (iIndex != -1)
-        {
-            RemoveFromArray(g_hPvPFlameEntities, iIndex);
         }
     }
 }
@@ -446,19 +306,18 @@ public Hook_PvPProjectileSpawnPost(ent)
 
 stock ChangeProjectileTeam(ent)
 {
-    if (bFriendlyFire)
+    if (g_bFriendlyFire)
     {
         decl String:sClass[64];
         GetEntityClassname(ent, sClass, sizeof(sClass));
         
-        new iThrowerOffset = FindDataMapOffs(ent, "m_hThrower");
         new iOwnerEntity = GetEntPropEnt(ent, Prop_Data, "m_hOwnerEntity");
         
-        if (iOwnerEntity == -1 && iThrowerOffset != -1)
+        if (iOwnerEntity == -1)
         {
-            iOwnerEntity = GetEntDataEnt2(ent, iThrowerOffset);
+            iOwnerEntity = GetEntPropEnt(ent, Prop_Data, "m_hThrower");
         }
-        
+
         if (IsValidClient(iOwnerEntity))
         {
             SetEntProp(ent, Prop_Data, "m_iInitialTeamNum", 0);
@@ -467,79 +326,7 @@ stock ChangeProjectileTeam(ent)
     }
 }
 
-public bool:Hook_ClientPvPShouldCollide(ent, collisiongroup, contentsmask, bool:originalResult)
-{
-    if (bFriendlyFire) return true;
-    return originalResult;
-}
-
-stock bool:IsClientCritBoosted(client)
-{
-    if (TF2_IsPlayerInCondition(client, TFCond_Kritzkrieged) ||
-        TF2_IsPlayerInCondition(client, TFCond_HalloweenCritCandy) ||
-        TF2_IsPlayerInCondition(client, TFCond_CritCanteen) ||
-        TF2_IsPlayerInCondition(client, TFCond_CritOnFirstBlood) ||
-        TF2_IsPlayerInCondition(client, TFCond_CritOnWin) ||
-        TF2_IsPlayerInCondition(client, TFCond_CritOnFlagCapture) ||
-        TF2_IsPlayerInCondition(client, TFCond_CritOnKill) ||
-        TF2_IsPlayerInCondition(client, TFCond_CritOnDamage) ||
-        TF2_IsPlayerInCondition(client, TFCond_CritMmmph))
-    {
-        return true;
-    }
-    
-    new iActiveWeapon = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
-    if (IsValidEdict(iActiveWeapon))
-    {
-        decl String:sNetClass[64];
-        GetEntityNetClass(iActiveWeapon, sNetClass, sizeof(sNetClass));
-        
-        if (StrEqual(sNetClass, "CTFFlameThrower"))
-        {
-            if (GetEntProp(iActiveWeapon, Prop_Send, "m_bCritFire")) return true;
-        
-            new iItemDef = GetEntProp(iActiveWeapon, Prop_Send, "m_iItemDefinitionIndex");
-            if (iItemDef == 594 && TF2_IsPlayerInCondition(client, TFCond_CritMmmph)) return true;
-        }
-        else if (StrEqual(sNetClass, "CTFMinigun"))
-        {
-            if (GetEntProp(iActiveWeapon, Prop_Send, "m_bCritShot")) return true;
-        }
-    }
-    
-    return false;
-}
-
 stock bool:IsValidClient(iClient)
 {
     return bool:(0 < iClient && iClient <= MaxClients && IsClientInGame(iClient));
 }
-
-/*static PvP_RemovePlayerProjectiles(client)
-{
-    for (new i = 0; i < sizeof(g_sPvPProjectileClasses); i++)
-    {
-        new ent = -1;
-        while ((ent = FindEntityByClassname(ent, g_sPvPProjectileClasses[i])) != -1)
-        {
-            new iThrowerOffset = FindDataMapOffs(ent, "m_hThrower");
-            new bool:bMine = false;
-        
-            new iOwnerEntity = GetEntPropEnt(ent, Prop_Data, "m_hOwnerEntity");
-            if (iOwnerEntity == client)
-            {
-                bMine = true;
-            }
-            else if (iThrowerOffset != -1)
-            {
-                iOwnerEntity = GetEntDataEnt2(ent, iThrowerOffset);
-                if (iOwnerEntity == client)
-                {
-                    bMine = true;
-                }
-            }
-            
-            if (bMine) AcceptEntityInput(ent, "Kill");
-        }
-    }
-}*/

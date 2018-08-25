@@ -1,0 +1,15 @@
+"Games"
+{
+    "tf"
+    {
+        "Offsets"
+        {
+            "CTFPlayer::WantsLagCompensationOnEntity"
+            {
+                "library"   "server"
+                "windows"   "327"
+                "linux"     "328"
+            }
+        }
+    }
+}
